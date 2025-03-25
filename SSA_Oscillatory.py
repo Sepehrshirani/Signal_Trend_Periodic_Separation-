@@ -6,7 +6,7 @@ a signal into trend, periodic, and noise components. The implementation includes
 trajectory matrix construction, SVD decomposition, and component reconstruction.
 
 Author: Sepehr Shirani
-Date: [Insert Date]
+Date: March 25th
 """
 
 import numpy as np
@@ -259,25 +259,9 @@ def main():
 
     # Plot first few components
     n_components = min(int(DEFAULT_COMPONENTS_RATIO * X.shape[0]), d)
-    fig, axes = plt.subplots(n_components, 1, figsize=(10, 2 * n_components))
-
-    for i, ax in enumerate(axes):
-        plot_2d_matrix(X_elem[i], f"Elementary Matrix {i}")
-
-    plt.tight_layout()
-    plt.show()
 
     # Plot component contributions
     plot_component_contributions(Sigma, n_components)
-
-    # Plot Hankelized components
-    fig, axes = plt.subplots(n_components, 1, figsize=(10, 2 * n_components))
-
-    for i, ax in enumerate(axes):
-        plot_2d_matrix(hankelize_matrix(X_elem[i]), f"Hankelized Component {i}")
-
-    plt.tight_layout()
-    plt.show()
 
     # Plot reconstructed components
     plt.figure(figsize=(12, 6))
