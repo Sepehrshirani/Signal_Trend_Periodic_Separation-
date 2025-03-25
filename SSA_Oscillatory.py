@@ -227,7 +227,7 @@ def main():
     plt.style.use(PLOT_STYLE)
 
     # Load and prepare data
-    file_path = "/Users/sepehrshirani/Desktop/test.edf"
+    file_path = "...."
     signal, fs = load_eeg_data(file_path)
     N = len(signal)
     t = np.arange(N) / fs  # Time axis in seconds
