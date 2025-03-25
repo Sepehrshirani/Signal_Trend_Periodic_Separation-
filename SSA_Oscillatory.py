@@ -1,168 +1,323 @@
+"""
+Singular Spectrum Analysis (SSA) for EEG Signal Decomposition
 
-# Make sure you have the necessary packages.
+This script performs Singular Spectrum Analysis (SSA) on EEG data to decompose
+a signal into trend, periodic, and noise components. The implementation includes
+trajectory matrix construction, SVD decomposition, and component reconstruction.
+
+Author: Sepehr Shirani
+Date: [Insert Date]
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 import mne
-import scipy.signal as signal
+from typing import Tuple, List
+from scipy.io import savemat
+import os
+from datetime import datetime
 
-# A simple little 2D matrix plotter, excluding x and y labels.
-def plot_2d(m, title=""):
-    plt.imshow(m)
+# Constants
+PLOT_STYLE = "seaborn-v0_8"  # Modern and clean plotting style
+DEFAULT_WINDOW_RATIO = 0.128  # Ratio of window length to signal length
+DEFAULT_COMPONENTS_RATIO = 0.25  # Show first 25% of components by default
+OUTPUT_DIR = "output"  # Directory to save results
+
+
+def ensure_output_dir_exists():
+    """Create output directory if it doesn't exist."""
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+
+
+def generate_output_filename(prefix: str, extension: str) -> str:
+    """
+    Generate timestamped output filename.
+
+    Args:
+        prefix: File name prefix
+        extension: File extension (without dot)
+
+    Returns:
+        Full output path
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(OUTPUT_DIR, f"{prefix}_{timestamp}.{extension}")
+
+
+def plot_2d_matrix(matrix: np.ndarray, title: str = "") -> None:
+    """
+    Plot a 2D matrix with clean formatting.
+
+    Args:
+        matrix: 2D numpy array to visualize
+        title: Title for the plot
+    """
+    plt.imshow(matrix, cmap="viridis", aspect="auto")
     plt.xticks([])
     plt.yticks([])
     plt.title(title)
+    plt.colorbar(label="Value")
 
 
-def Hankelise(X):
-    L, K = X.shape
+def hankelize_matrix(matrix: np.ndarray) -> np.ndarray:
+    """
+    Perform Hankelization (anti-diagonal averaging) on a matrix.
+
+    Args:
+        matrix: Input matrix to Hankelize
+
+    Returns:
+        Hankelized matrix with same dimensions as input
+    """
+    rows, cols = matrix.shape
     transpose = False
-    if L > K:
-        X = X.T
-        L, K = K, L
+
+    # Work with the matrix in "landscape" orientation for easier indexing
+    if rows > cols:
+        matrix = matrix.T
+        rows, cols = cols, rows
         transpose = True
-    HX = np.zeros((L, K))
 
-    for m in range(L):
-        for n in range(K):
-            s = m + n
-            if 0 <= s <= L - 1:
-                for l in range(0, s + 1):
-                    HX[m, n] += 1 / (s + 1) * X[l, s - l]
-            elif L <= s <= K - 1:
-                for l in range(0, L - 1):
-                    HX[m, n] += 1 / (L - 1) * X[l, s - l]
-            elif K <= s <= K + L - 2:
-                for l in range(s - K + 1, L):
-                    HX[m, n] += 1 / (K + L - s - 1) * X[l, s - l]
-    if transpose:
-        return HX.T
-    else:
-        return HX
+    hankel_matrix = np.zeros((rows, cols))
 
+    for m in range(rows):
+        for n in range(cols):
+            s = m + n  # Anti-diagonal index
 
-"""For anti-diagonals averaging of the given elementary matrix, X_i, and returning a time series."""
-def X_to_TS(X_i):
-    X_rev = X_i[::-1]
-    return np.array([X_rev.diagonal(i).mean() for i in range(-X_i.shape[0]+1, X_i.shape[1])])
+            if 0 <= s <= rows - 1:
+                # First triangular section
+                hankel_matrix[m, n] = np.mean([matrix[l, s - l] for l in range(s + 1)])
+            elif rows <= s <= cols - 1:
+                # Middle rectangular section
+                hankel_matrix[m, n] = np.mean([matrix[l, s - l] for l in range(rows)])
+            elif cols <= s <= cols + rows - 2:
+                # Second triangular section
+                hankel_matrix[m, n] = np.mean([matrix[l, s - l]
+                                               for l in range(s - cols + 1, rows)])
 
-#Choose the correct directory
-file_path = "/Users/sepehrshirani/Desktop/test.edf"
-raw = mne.io.read_raw_edf(file_path)
-# Extract sampling frequency
-fs = raw.info['sfreq']
-# Get the data as a NumPy array
-data, times = raw[:]
-
-#Choosing channel and time
-F=data[5,11200:12224]
-
-#Setting up values
-F=F-np.mean(F)
-N = len(F)
-t = np.arange(0,N)
-L = int(N*0.128)  # Window length
-K = N - L + 1 # The number of columns in the trajectory matrix.
-# Create the trajectory matrix
-X = np.column_stack([F[i:i+L] for i in range(0,K)])
+    return hankel_matrix.T if transpose else hankel_matrix
 
 
-ax = plt.matshow(X)
-plt.xlabel("$L:$ Window Length")
-plt.ylabel("$K=N-L+1$")
-plt.colorbar(ax.colorbar, fraction=0.025)
-ax.colorbar.set_label("Value")
-plt.title("The Trajectory Matrix of the Signal")
-plt.show()
+def elementary_to_timeseries(elementary_matrix: np.ndarray) -> np.ndarray:
+    """
+    Convert elementary matrix to time series through anti-diagonal averaging.
 
-d = np.linalg.matrix_rank(X) # The intrinsic dimensionality of the trajectory space.
-U, Sigma, V = np.linalg.svd(X)
-V = V.T
-X_elem = np.array( [Sigma[i] * np.outer(U[:,i], V[:,i]) for i in range(0,d)] )
+    Args:
+        elementary_matrix: Elementary matrix from SVD decomposition
 
-# Quick sanity check: the sum of all elementary matrices in X_elm should be equal to X, to within a
-if not np.allclose(X, X_elem.sum(axis=0), atol=1e-10):
-    print("WARNING: The sum of X's elementary matrices is not equal to X!")
+    Returns:
+        Reconstructed time series
+    """
+    reversed_matrix = elementary_matrix[::-1]
+    return np.array([reversed_matrix.diagonal(i).mean()
+                     for i in range(-elementary_matrix.shape[0] + 1,
+                                    elementary_matrix.shape[1])])
 
 
-n = min(20, d)
-for i in range(n):
-    plt.subplot(4,5,i+1)
-    title = "X_{" + str(i) + "}"
-    plot_2d(X_elem[i], title)
-plt.show()
+def load_eeg_data(filepath: str, channel: int = 5,
+                  time_range: Tuple[int, int] = (11200, 12224)) -> Tuple[np.ndarray, float]:
+    """
+    Load EEG data from EDF file and extract specified channel and time range.
+
+    Args:
+        filepath: Path to EDF file
+        channel: Channel index to extract
+        time_range: Start and end indices for time segment
+
+    Returns:
+        Tuple of (signal, sampling_frequency)
+    """
+    raw = mne.io.read_raw_edf(filepath)
+    fs = raw.info['sfreq']
+    data, _ = raw[:]
+    signal = data[channel, time_range[0]:time_range[1]]
+    return signal - np.mean(signal), fs  # Remove DC component
 
 
-sigma_sumsq = (Sigma**2).sum()
-fig, ax = plt.subplots(1, 2, figsize=(14,5))
-ax[0].plot(Sigma**2 / sigma_sumsq * 100, lw=2.5)
-ax[0].set_xlim(0,19)
-ax[0].set_title("Relative Contribution to Trajectory Matrix")
-ax[0].set_xlabel("$i$")
-ax[0].set_ylabel("Contribution (%)")
-ax[1].plot((Sigma**2).cumsum() / sigma_sumsq * 100, lw=2.5)
-ax[1].set_xlim(0,19)
-ax[1].set_title("Cumulative Contribution to Trajectory Matrix")
-ax[1].set_xlabel("$i$")
-ax[1].set_ylabel("Contribution (%)")
-plt.show()
+def create_trajectory_matrix(signal: np.ndarray, window_ratio: float = DEFAULT_WINDOW_RATIO) -> np.ndarray:
+    """
+    Create trajectory matrix (Hankel matrix) from time series.
+
+    Args:
+        signal: Input time series
+        window_ratio: Ratio of window length to signal length
+
+    Returns:
+        Trajectory matrix
+    """
+    N = len(signal)
+    L = int(N * window_ratio)  # Window length
+    K = N - L + 1  # Number of columns
+
+    # Create trajectory matrix using stride tricks for efficiency
+    strides = (signal.strides[0], signal.strides[0])
+    shape = (L, K)
+    return np.lib.stride_tricks.as_strided(signal, shape=shape, strides=strides)
 
 
-n = min(d, 20)
-for j in range(0,n):
-    plt.subplot(4,5,j+1)
-    title = r"$\tilde{\mathbf{X}}_{" + str(j) + "}$"
-    plot_2d(Hankelise(X_elem[j]), title)
-plt.tight_layout()
-plt.plot()
+def plot_component_contributions(singular_values: np.ndarray, n_components: int = 10) -> None:
+    """
+    Plot relative and cumulative contributions of singular components.
+
+    Args:
+        singular_values: Array of singular values from SVD
+        n_components: Number of components to display
+    """
+    sigma_sumsq = (singular_values ** 2).sum()
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Relative contribution plot
+    ax1.plot(singular_values ** 2 / sigma_sumsq * 100, 'o-', lw=2.5)
+    ax1.set_xlim(0, n_components - 1)
+    ax1.set_title("Relative Contribution of Components")
+    ax1.set_xlabel("Component Index ($i$)")
+    ax1.set_ylabel("Contribution (%)")
+    ax1.grid(True, alpha=0.3)
+
+    # Cumulative contribution plot
+    ax2.plot((singular_values ** 2).cumsum() / sigma_sumsq * 100, 'o-', lw=2.5)
+    ax2.set_xlim(0, n_components - 1)
+    ax2.set_title("Cumulative Contribution of Components")
+    ax2.set_xlabel("Component Index ($i$)")
+    ax2.set_ylabel("Contribution (%)")
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
 
 
+def save_results(trend: np.ndarray, periodic: np.ndarray, noise: np.ndarray,
+                 time_vector: np.ndarray, sampling_rate: float) -> None:
+    """
+    Save the decomposition results to files.
 
-fig = plt.subplot()
-# Convert elementary matrices straight to a time series - no need to construct any Hankel matrices.
-for i in range(n):
-    F_i = X_to_TS(X_elem[i])
-    fig.axes.plot(t, F_i, lw=2)
+    Args:
+        trend: Trend component time series
+        periodic: Periodic component time series
+        noise: Noise component time series
+        time_vector: Time axis values
+        sampling_rate: Sampling frequency in Hz
+    """
+    # Save components as .mat files
+    mat_data = {
+        'trend': trend,
+        'periodic': periodic,
+        'noise': noise,
+        'time': time_vector,
+        'fs': sampling_rate
+    }
 
-fig.axes.plot(t, F, alpha=1, lw=1)
-fig.set_xlabel("$t$")
-fig.set_ylabel(r"$\tilde{F}_i(t)$")
-legend = [r"$\tilde{F}_{%s}$" %i for i in range(n)] + ["$F$"]
-fig.set_title(f"The First {n} Components of the original signal")
-fig.legend(legend, loc=(1.05,0.1));
-plt.show()
+    mat_filename = generate_output_filename("ssa_components", "mat")
+    savemat(mat_filename, mat_data)
+    print(f"Saved components to {mat_filename}")
 
-
-# Assemble the grouped components of the time series.
-F_trend = X_to_TS(X_elem[0])
-F_periodic = X_to_TS(X_elem[1:18].sum(axis=0))
-F_noise = X_to_TS(X_elem[19:].sum(axis=0))
-
-# Plot the toy time series and its separated components on a single plot.
-plt.plot(t,F, lw=1,label='Original')
-plt.plot(t, F_trend,label='Trend')
-plt.plot(t, F_periodic,label='Periodic')
-plt.plot(t, F_noise, alpha=0.5,label='Noise')
-plt.xlabel("t")
-plt.ylabel(r"$\tilde{F}^{(j)}$")
-groups = ["trend", "periodic", "noise"]
-plt.legend()
-plt.title("Grouped Time Series Components")
-plt.show()
-
-# A list of tuples so we can create the next plot with a loop.
-components = [("Trend", F_trend),
-              ("Periodic 1",  F_periodic),
-              ("Noise", F_noise)]
-
-# Plot the separated components and original components together.
-fig = plt.figure()
-n=1
-for name, ssa_comp in components:
-    ax = fig.add_subplot(2,2,n)
-    ax.plot(t, ssa_comp)
-    ax.set_title(name, fontsize=16)
-    ax.set_xticks([])
-    n += 1
-plt.show()
+    # Save final plot as JPG
+    plot_filename = generate_output_filename("ssa_decomposition", "jpg")
+    plt.savefig(plot_filename, dpi=300, bbox_inches='tight', format='jpeg')
+    print(f"Saved plot to {plot_filename}")
 
 
+def main():
+    # Set up output directory
+    ensure_output_dir_exists()
+
+    # Set plotting style
+    plt.style.use(PLOT_STYLE)
+
+    # Load and prepare data
+    file_path = "/Users/sepehrshirani/Desktop/test.edf"
+    signal, fs = load_eeg_data(file_path)
+    N = len(signal)
+    t = np.arange(N) / fs  # Time axis in seconds
+
+    # Create trajectory matrix
+    X = create_trajectory_matrix(signal)
+
+    # Plot trajectory matrix
+    plt.figure(figsize=(10, 6))
+    ax = plt.matshow(X, fignum=0)
+    plt.xlabel("$K=N-L+1$ (Columns)")
+    plt.ylabel("$L$ (Window Length)")
+    plt.colorbar(ax.colorbar, fraction=0.025)
+    ax.colorbar.set_label("Amplitude ($\mu V$)")
+    plt.title("Trajectory Matrix of EEG Signal", pad=20)
+    plt.show()
+
+    # Perform SVD decomposition
+    U, Sigma, Vh = np.linalg.svd(X, full_matrices=False)
+    V = Vh.T
+    d = np.linalg.matrix_rank(X)
+
+    # Create elementary matrices
+    X_elem = np.array([Sigma[i] * np.outer(U[:, i], V[:, i]) for i in range(d)])
+
+    # Verify decomposition
+    if not np.allclose(X, X_elem.sum(axis=0), atol=1e-10):
+        print("Warning: Sum of elementary matrices does not equal original matrix")
+
+    # Plot first few components
+    n_components = min(int(DEFAULT_COMPONENTS_RATIO * X.shape[0]), d)
+    fig, axes = plt.subplots(n_components, 1, figsize=(10, 2 * n_components))
+
+    for i, ax in enumerate(axes):
+        plot_2d_matrix(X_elem[i], f"Elementary Matrix {i}")
+
+    plt.tight_layout()
+    plt.show()
+
+    # Plot component contributions
+    plot_component_contributions(Sigma, n_components)
+
+    # Plot Hankelized components
+    fig, axes = plt.subplots(n_components, 1, figsize=(10, 2 * n_components))
+
+    for i, ax in enumerate(axes):
+        plot_2d_matrix(hankelize_matrix(X_elem[i]), f"Hankelized Component {i}")
+
+    plt.tight_layout()
+    plt.show()
+
+    # Plot reconstructed components
+    plt.figure(figsize=(12, 6))
+
+    for i in range(n_components):
+        component = elementary_to_timeseries(X_elem[i])
+        plt.plot(t, component, lw=2, label=f"Component {i}")
+
+    plt.plot(t, signal, 'k', alpha=0.3, lw=1, label="Original")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Amplitude ($\mu V$)")
+    plt.title(f"First {n_components} Reconstructed Components")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    # Group components into meaningful categories
+    trend = elementary_to_timeseries(X_elem[0])
+    periodic = elementary_to_timeseries(X_elem[1:int(n_components * 0.66)].sum(axis=0))
+    noise = elementary_to_timeseries(X_elem[int(n_components * 0.66) + 1:n_components].sum(axis=0))
+
+    # Plot grouped components
+    plt.figure(figsize=(12, 6))
+    plt.plot(t, signal, 'k', alpha=0.3, label="Original Signal")
+    plt.plot(t, trend, label="Trend Component")
+    plt.plot(t, periodic, label="Periodic Components")
+    plt.plot(t, noise, alpha=0.6, label="Noise Components")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Amplitude ($\mu V$)")
+    plt.title("SSA Decomposition of EEG Signal")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    # Save the results before showing the plot
+    save_results(trend, periodic, noise, t, fs)
+
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
